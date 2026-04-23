@@ -38,6 +38,9 @@ _MCP = {
     "serx-mcp":       {"type": "url", "name": "serx-mcp",       "url": "https://serx-mcp-production-5552.up.railway.app/mcp"},
     "resend-mcp":     {"type": "url", "name": "resend-mcp",     "url": "https://resend-mcp.up.railway.app/mcp"},
     "emailbison":     {"type": "url", "name": "emailbison",     "url": "https://mcp.emailbison.com/mcp"},
+    "github-oex":     {"type": "url", "name": "github-oex",     "url": "https://api.githubcopilot.com/mcp"},
+    "exa":            {"type": "url", "name": "exa",            "url": "https://mcp.exa.ai/mcp"},
+    "stripe":         {"type": "url", "name": "stripe",         "url": "https://mcp.stripe.com/"},
 }
 
 # Autonomous — no human-in-the-loop. Orchestrators fire from webhooks.
@@ -74,6 +77,32 @@ AGENTS: dict[str, dict] = {
     "canceled-booking-orchestrator": {
         "mcps": ["oex-mcp", "serx-mcp", "resend-mcp"],
         "system": _placeholder_system("canceled"),
+    },
+    "deal-orchestrator": {
+        "mcps": [
+            "serx-mcp",
+            "cal-mcp",
+            "github-oex",
+            "stripe",
+            "resend-mcp",
+            "oex-mcp",
+            "exa",
+            "emailbison",
+        ],
+        "system": (
+            "You are the deal-orchestrator-agent. You are triggered after a "
+            "sales meeting, once a post-meeting form has been filled out and "
+            "stored in the serx-api db. The initial user message will point "
+            "you at the stored form row.\n\n"
+            "At a high level you will: read the form row from serx-api, draft "
+            "proposal/agreement content, create a Stripe checkout/payment "
+            "link, write the proposal content and checkout link back to the "
+            "db, then look up the prospect and send them an email via Resend.\n\n"
+            "TODO: flesh out the detailed playbook (field mapping, proposal "
+            "template, Stripe product/price selection, email copy). For now, "
+            "read the payload and summarize what you would do — do not take "
+            "action yet.\n"
+        ),
     },
     "inbox-orchestrator": {
         "mcps": ["oex-mcp", "serx-mcp", "resend-mcp", "emailbison"],
