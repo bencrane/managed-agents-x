@@ -1,0 +1,18 @@
+#!/bin/sh
+# Wrapper that runs the Doppler CLI with this project's directory scope.
+#
+# Why this exists: the shell inherits DOPPLER_TOKEN / DOPPLER_PROJECT /
+# DOPPLER_CONFIG / DOPPLER_ENVIRONMENT from a home-directory default
+# (see `doppler configure --all`). Those env vars override the per-directory
+# scope that was set for /Users/benjamincrane/managed-agents-x, so
+# `doppler run` from here would silently hit the wrong project. This wrapper
+# strips those four variables before exec'ing doppler, forcing the CLI to
+# fall back to the directory-scoped config (project: managed-agents-x,
+# config: prd).
+#
+# Usage:
+#   ./scripts/doppler secrets
+#   ./scripts/doppler run -- uvicorn app.main:app --reload --port 8080
+#   ./scripts/doppler setup  # reconfigure scope if it ever drifts
+set -e
+exec env -u DOPPLER_TOKEN -u DOPPLER_PROJECT -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT doppler "$@"
