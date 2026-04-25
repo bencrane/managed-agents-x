@@ -4,33 +4,30 @@ This file is the canonical list of environment variables the app expects.
 Values are injected at runtime by `doppler run --` (via the Doppler CLI in
 the container) from the Doppler project `managed-agents-x`, config `prd`.
 
-Design rule: every field must be tolerant of being missing at import time.
-The app must boot and `/health` must return 200 even if Doppler is
-unreachable or a variable is unset. Required secrets are validated lazily
-at the call site that actually needs them (see `require()`).
+Two tiers of secrets:
 
-Notes on a few specific fields:
-- `mags_auth_token` is the inbound bearer token callers present when reaching
-  into this service (future `/agents*` surface, `/admin/status`, etc.). It's
-  the one secret the authenticated surface treats as required. Paired on the
-  caller side with `MAG_API_URL` (the caller's pointer at this service).
-- `anthropic_managed_agents_api_key` **does** belong to this project
-  (opposite of `ops-engine-x`, where it is deliberately absent).
-  `managed-agents-x` is the designated owner of the Anthropic
-  managed-agents product surface (agent CRUD, system-prompt versioning,
-  sync), so the Anthropic API key is expected to live in this project's
-  Doppler config. Add `ANTHROPIC_MANAGED_AGENTS_API_KEY` to the `prd`
-  config before exercising any code path that calls Anthropic.
-- `mags_db_url_pooled` is the Postgres DSN the app uses at runtime
-  (Supabase transaction pooler). `mags_db_url_direct` is the direct
-  connection, exposed as a separate setting for future migration scripts
-  and not read by the app at runtime.
-- The remaining `mags_supabase_*` fields are reserved for future use; the
-  skeleton does not read them yet.
+1. **Strict-startup, required at boot.** Loaded as `Settings.*_required`
+   fields and validated immediately when this module is imported. Boot fails
+   loudly if any are missing. These cover the inbound auth surface — there
+   is no useful operating mode without them.
+
+   - `MAGS_INTERNAL_BEARER_TOKEN` — static bearer for internal callers
+     (e.g. `ops-engine-x` → `POST /internal/agents/{agent_id}/invoke`).
+   - `AUX_JWKS_URL`, `AUX_ISSUER`, `AUX_AUDIENCE` — JWT verification config
+     pointing at `auth-engine-x`.
+
+2. **Lazy, tolerant.** Optional or feature-scoped secrets. Missing values
+   only fail when the call site that needs them runs (`require()` below).
+   These keep `/health` green when feature credentials are absent.
+
+   - `ANTHROPIC_MANAGED_AGENTS_API_KEY` — Anthropic managed-agents key.
+   - `MAGS_DB_URL_POOLED` / `MAGS_DB_URL_DIRECT` — Postgres DSNs.
+   - `MAGS_SUPABASE_*` — reserved for future use.
 """
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,9 +35,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
-    mags_auth_token: str | None = None
+    # ----- Strict-startup, required ----------------------------------------
+    # These are validated at module import (see the `Settings()` call below).
+    # If any are missing, the process fails to boot.
+
+    mags_internal_bearer_token: str = Field(..., alias="MAGS_INTERNAL_BEARER_TOKEN")
+    auth_jwks_url: str = Field(..., alias="AUX_JWKS_URL")
+    auth_issuer: str = Field(..., alias="AUX_ISSUER")
+    auth_audience: str = Field(..., alias="AUX_AUDIENCE")
+
+    # ----- Lazy, optional --------------------------------------------------
+
     anthropic_managed_agents_api_key: str | None = None
 
     mags_db_url_pooled: str | None = None
@@ -53,20 +61,23 @@ class Settings(BaseSettings):
     mags_supabase_project_ref: str | None = None
 
 
+# Strict-startup validation: pydantic raises ValidationError here if any of
+# the required fields above are missing from the environment. We do NOT
+# catch — the process should fail to boot with a clear traceback identifying
+# the missing variable, rather than 503-ing every authenticated request.
 settings = Settings()
 
 
 class MissingSecretError(RuntimeError):
-    """Raised when a secret required by a code path is not configured."""
+    """Raised when a lazy/optional secret required by a code path is unset."""
 
 
 def require(name: str) -> str:
-    """Fetch a required secret by attribute name, raising a clear error if unset.
+    """Fetch a lazy secret by attribute name, raising a clear error if unset.
 
-    Use this at the call site of any feature that genuinely needs the secret,
-    e.g. `token = require("mags_auth_token")`. This keeps startup tolerant
-    while failing loudly and clearly when a feature is exercised without its
-    required configuration.
+    Use at the call site of any feature backed by a tier-2 (optional) secret,
+    e.g. `key = require("anthropic_managed_agents_api_key")`. Tier-1 secrets
+    (auth) are already guaranteed by startup validation and don't need this.
     """
     value = getattr(settings, name, None)
     if not value:
