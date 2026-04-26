@@ -34,10 +34,11 @@ Secrets this project **does** expect:
 
 | Name | Required | Notes |
 | ---- | -------- | ----- |
-| `MAGS_INTERNAL_BEARER_TOKEN` | required (boot) | Static shared bearer for **internal server-to-server** callers. Gates `POST /internal/agents/{agent_id}/invoke` (`ops-engine-x` posts here once it has resolved an event to an agent). The **same value must exist in `ops-engine-x`'s Doppler `prd` config** (also as `MAGS_INTERNAL_BEARER_TOKEN`) so its outbound call authenticates. Validated at process startup — the app will refuse to boot if missing. |
-| `AUX_JWKS_URL` | required (boot) | JWKS endpoint of `auth-engine-x`. Used by `app/auth/jwt.py` to verify EdDSA JWTs presented by operator-facing callers (HQ frontend, admin tooling). Inherited from the `shared-services` Doppler base. |
-| `AUX_ISSUER` | required (boot) | Expected `iss` claim on inbound operator JWTs. Inherited from `shared-services`. |
-| `AUX_AUDIENCE` | required (boot) | Expected `aud` claim on inbound operator JWTs. |
+| `AUX_JWKS_URL` | required (boot) | JWKS endpoint of `auth-engine-x`. Used by `aux_m2m_server` to verify EdDSA JWTs (both operator session JWTs and M2M JWTs). Inherited from the `shared-services` Doppler base. |
+| `AUX_ISSUER` | required (boot) | Expected `iss` claim on inbound JWTs. Inherited from `shared-services`. |
+| `AUX_AUDIENCE` | required (boot) | Expected `aud` claim on inbound JWTs. Inherited from `shared-services`. |
+| `AUX_API_BASE_URL` | required (boot) | `auth-engine-x` base URL. Used by `aux_m2m_client` to mint M2M JWTs for any outbound calls this backend makes. Inherited from `shared-services`. |
+| `AUX_M2M_API_KEY` | required (boot) | This backend's own M2M API key (its identity in `auth-engine-x`). Caller-side credential for outbound calls to other AUX backends. **Specific to managed-agents-x** — not shared. |
 | `ANTHROPIC_MANAGED_AGENTS_API_KEY` | required (when Anthropic code paths land) | Anthropic API key scoped to the managed-agents product. **Lives here**, not in `ops-engine-x`. `managed-agents-x` is the designated holder of Anthropic credentials for the platform. |
 | `MAGS_DB_URL_POOLED` | required (when DB code paths run) | Postgres DSN using Supabase's transaction pooler. This is what the app uses at runtime. |
 | `MAGS_DB_URL_DIRECT` | optional (reserved) | Direct Postgres connection string. Reserved for future migration scripts; not read by the app at runtime. |
@@ -49,7 +50,8 @@ Secrets this project **does** expect:
 
 Secrets this project **does NOT expect** (deliberate):
 
-- `OPEX_AUTH_TOKEN` — lives in the `ops-engine-x` Doppler config. If `managed-agents-x` ever needs to call `ops-engine-x`, a dedicated outbound credential will be added here then.
+- `MAGS_INTERNAL_BEARER_TOKEN` — **removed** during the M2M migration. Internal callers now mint short-lived EdDSA M2M JWTs via `auth-engine-x` instead of presenting a static shared secret.
+- `OPEX_AUTH_TOKEN` / any other backend-specific bearer — outbound calls (if `managed-agents-x` ever makes any to other AUX backends) use `aux_m2m_client.M2MAuth` with `AUX_M2M_API_KEY`, not service-specific bearers.
 
 ## Local development
 
@@ -107,8 +109,9 @@ curl localhost:8080/          # {"service":"managed-agents-x","status":"ok"}
 curl -H "Authorization: Bearer $OPERATOR_JWT" localhost:8080/admin/status
 # → {"service":"managed-agents-x","status":"ok","secrets_loaded":{...}}
 #
-# /admin/status requires an operator JWT (auth-engine-x session token).
-# The `/internal/*` surface uses MAGS_INTERNAL_BEARER_TOKEN instead.
+# /admin/status requires an operator session JWT from auth-engine-x.
+# The `/internal/*` surface requires an M2M JWT (also from auth-engine-x);
+# both verified by aux_m2m_server against the same JWKS endpoint.
 ```
 
 You can also smoke the container locally without Doppler (the entrypoint falls back to plain uvicorn):

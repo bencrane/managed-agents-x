@@ -9,13 +9,15 @@ requires a secret reads it lazily via `app.config.require(...)` (or via the
 relevant FastAPI `Depends()`), so `/health` stays green even when Doppler is
 unreachable or individual secrets are unset.
 
-Inbound auth has two surfaces:
+Inbound auth has two surfaces, both backed by `aux_m2m_server`:
 
-- Operator-facing routes (`/admin/*`, `/agents*`) use `get_current_auth`,
-  which verifies an EdDSA JWT against `auth-engine-x`'s JWKS.
-- Internal server-to-server routes (`/internal/*`) use
-  `require_internal_bearer`, which checks a static shared bearer token
-  (`MAGS_INTERNAL_BEARER_TOKEN`).
+- Operator-facing routes (`/admin/*`, `/agents*`) use `require_session`,
+  which verifies an EdDSA session JWT against `auth-engine-x`'s JWKS.
+- Internal server-to-server routes (`/internal/*`) use `require_m2m`,
+  which verifies an EdDSA M2M JWT (caller mints via auth-engine-x with its
+  own AUX_M2M_API_KEY).
+
+There is no static bearer fallback. Both gates require valid JWTs.
 """
 
 from __future__ import annotations
@@ -31,8 +33,9 @@ from pydantic import BaseModel, Field
 from app import agent_defaults as agent_defaults_store
 from app import invocation_log as invocation_log_store
 from app.anthropic_client import create_session, get_agent, list_agents, send_user_message
+from aux_m2m_server import require_m2m, require_session
+
 from app.config import settings
-from app.deps import get_current_auth, require_internal_bearer
 from app.sync import sync_from_anthropic
 
 
@@ -106,8 +109,9 @@ app = FastAPI(
         "Managed-agents product surface. Wraps Anthropic's managed-agents API "
         "and stores per-agent defaults plus version history. Future home of "
         "CRUD, system-prompt versioning, drafts/templates, A/B tests, and "
-        "analytics. Operator routes require an EdDSA JWT from auth-engine-x; "
-        "internal server-to-server routes require MAGS_INTERNAL_BEARER_TOKEN."
+        "analytics. Operator routes require an EdDSA session JWT; internal "
+        "server-to-server routes require an EdDSA M2M JWT — both verified "
+        "against auth-engine-x's JWKS."
     ),
 )
 
@@ -124,7 +128,7 @@ def root() -> dict[str, str]:
     return {"service": "managed-agents-x", "status": "ok"}
 
 
-@app.get("/admin/status", dependencies=[Depends(get_current_auth)])
+@app.get("/admin/status", dependencies=[Depends(require_session)])
 def admin_status() -> dict[str, object]:
     """Authenticated secret-load probe.
 
@@ -138,10 +142,11 @@ def admin_status() -> dict[str, object]:
         "service": "managed-agents-x",
         "status": "ok",
         "secrets_loaded": {
-            "mags_internal_bearer_token": bool(settings.mags_internal_bearer_token),
-            "auth_jwks_url": bool(settings.auth_jwks_url),
-            "auth_issuer": bool(settings.auth_issuer),
-            "auth_audience": bool(settings.auth_audience),
+            "aux_jwks_url": bool(settings.aux_jwks_url),
+            "aux_issuer": bool(settings.aux_issuer),
+            "aux_audience": bool(settings.aux_audience),
+            "aux_api_base_url": bool(settings.aux_api_base_url),
+            "aux_m2m_api_key": bool(settings.aux_m2m_api_key),
             "anthropic_managed_agents_api_key": bool(settings.anthropic_managed_agents_api_key),
             "mags_db_url_pooled": bool(settings.mags_db_url_pooled),
         },
@@ -160,7 +165,7 @@ def _passthrough_upstream_error(exc: httpx.HTTPStatusError) -> JSONResponse:
 
 # ----- Admin sync -----------------------------------------------------------
 
-@app.post("/admin/sync/anthropic", dependencies=[Depends(get_current_auth)])
+@app.post("/admin/sync/anthropic", dependencies=[Depends(require_session)])
 def admin_sync_anthropic() -> dict[str, object]:
     """Pull all managed agents from Anthropic and reconcile into the DB."""
     return sync_from_anthropic().as_dict()
@@ -174,7 +179,7 @@ def admin_sync_anthropic() -> dict[str, object]:
 
 @app.get(
     "/agents/defaults",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=AgentDefaultsList,
 )
 def list_agent_defaults() -> AgentDefaultsList:
@@ -185,7 +190,7 @@ def list_agent_defaults() -> AgentDefaultsList:
 
 @app.get(
     "/agents/{agent_id}/defaults",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=AgentDefaults,
 )
 def get_agent_defaults(agent_id: str) -> AgentDefaults:
@@ -197,7 +202,7 @@ def get_agent_defaults(agent_id: str) -> AgentDefaults:
 
 @app.put(
     "/agents/{agent_id}/defaults",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=AgentDefaults,
 )
 def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> AgentDefaults:
@@ -212,7 +217,7 @@ def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> AgentDef
 
 @app.delete(
     "/agents/{agent_id}/defaults",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=DeleteResult,
 )
 def delete_agent_defaults(agent_id: str) -> DeleteResult:
@@ -229,9 +234,9 @@ def delete_agent_defaults(agent_id: str) -> DeleteResult:
 # inspect (source, event_name) to pick an agent — it just invokes the agent
 # in the URL. See MANAGED-AGENTS-BRIEF.md §"Hold-the-line rules" #1.
 #
-# Auth: `require_internal_bearer` (static MAGS_INTERNAL_BEARER_TOKEN). The
-# `/internal/*` prefix is intentionally distinct from operator routes so the
-# auth surface stays cleanly split: operator JWT vs static service bearer.
+# Auth: `require_m2m` (EdDSA M2M JWT). The `/internal/*` prefix is intentionally
+# distinct from operator routes so the auth surface stays cleanly split:
+# operator session JWT vs system-service M2M JWT. Both verified by aux_m2m_server.
 
 def _format_event_message(
     source: str,
@@ -256,7 +261,7 @@ def _format_event_message(
 
 @app.post(
     "/internal/agents/{agent_id}/invoke",
-    dependencies=[Depends(require_internal_bearer)],
+    dependencies=[Depends(require_m2m)],
     response_model=InvokeAgentResult,
 )
 def invoke_agent(agent_id: str, payload: InvokeAgentPayload) -> InvokeAgentResult:
@@ -345,7 +350,7 @@ def invoke_agent(agent_id: str, payload: InvokeAgentPayload) -> InvokeAgentResul
 
 # ----- Anthropic passthrough (live reads) -----------------------------------
 
-@app.get("/agents", dependencies=[Depends(get_current_auth)], response_model=None)
+@app.get("/agents", dependencies=[Depends(require_session)], response_model=None)
 def get_agents() -> JSONResponse | dict[str, object]:
     """List all managed agents (live passthrough to Anthropic, paginated server-side)."""
     try:
@@ -357,7 +362,7 @@ def get_agents() -> JSONResponse | dict[str, object]:
     return {"data": agents, "count": len(agents)}
 
 
-@app.get("/agents/{agent_id}", dependencies=[Depends(get_current_auth)], response_model=None)
+@app.get("/agents/{agent_id}", dependencies=[Depends(require_session)], response_model=None)
 def get_agent_by_id(agent_id: str) -> JSONResponse | dict:
     """Single agent (live passthrough to Anthropic)."""
     try:

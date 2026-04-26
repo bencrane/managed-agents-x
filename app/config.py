@@ -1,51 +1,35 @@
-"""Secret contract for the application.
+"""Secret contract for managed-agents-x.
 
-This file is the canonical list of environment variables the app expects.
-Values are injected at runtime by `doppler run --` (via the Doppler CLI in
-the container) from the Doppler project `managed-agents-x`, config `prd`.
+Auth foundation is inherited from `aux_m2m_server.BaseAuthSettings` —
+backends do not redeclare AUX_* fields. Backend-specific secrets are
+declared below as either tier-1 (boot-required) or tier-2 (lazy/optional).
 
-Two tiers of secrets:
+Tier-1 secrets — boot-required (validated by Pydantic at module import):
+    AUX_JWKS_URL, AUX_ISSUER, AUX_AUDIENCE
+    AUX_M2M_API_KEY, AUX_API_BASE_URL  (this backend's own M2M identity)
+        — all five inherited from BaseAuthSettings.
 
-1. **Strict-startup, required at boot.** Loaded as `Settings.*_required`
-   fields and validated immediately when this module is imported. Boot fails
-   loudly if any are missing. These cover the inbound auth surface — there
-   is no useful operating mode without them.
+Tier-2 secrets — lazy, fail at call site if needed but unset:
+    ANTHROPIC_MANAGED_AGENTS_API_KEY  (Anthropic managed-agents key)
+    MAGS_DB_URL_POOLED / MAGS_DB_URL_DIRECT  (Postgres DSNs)
+    MAGS_SUPABASE_*  (reserved for future use)
 
-   - `MAGS_INTERNAL_BEARER_TOKEN` — static bearer for internal callers
-     (e.g. `ops-engine-x` → `POST /internal/agents/{agent_id}/invoke`).
-   - `AUX_JWKS_URL`, `AUX_ISSUER`, `AUX_AUDIENCE` — JWT verification config
-     pointing at `auth-engine-x`.
-
-2. **Lazy, tolerant.** Optional or feature-scoped secrets. Missing values
-   only fail when the call site that needs them runs (`require()` below).
-   These keep `/health` green when feature credentials are absent.
-
-   - `ANTHROPIC_MANAGED_AGENTS_API_KEY` — Anthropic managed-agents key.
-   - `MAGS_DB_URL_POOLED` / `MAGS_DB_URL_DIRECT` — Postgres DSNs.
-   - `MAGS_SUPABASE_*` — reserved for future use.
+Doppler project: `managed-agents-x`, config `prd`. AUX_* values are also
+syncable from `shared-services` for cross-service consistency.
 """
 
 from __future__ import annotations
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from aux_m2m_server import BaseAuthSettings
 
 
-class Settings(BaseSettings):
+class Settings(BaseAuthSettings):
     model_config = SettingsConfigDict(
         case_sensitive=False,
         extra="ignore",
-        populate_by_name=True,
     )
-
-    # ----- Strict-startup, required ----------------------------------------
-    # These are validated at module import (see the `Settings()` call below).
-    # If any are missing, the process fails to boot.
-
-    mags_internal_bearer_token: str = Field(..., alias="MAGS_INTERNAL_BEARER_TOKEN")
-    auth_jwks_url: str = Field(..., alias="AUX_JWKS_URL")
-    auth_issuer: str = Field(..., alias="AUX_ISSUER")
-    auth_audience: str = Field(..., alias="AUX_AUDIENCE")
 
     # ----- Lazy, optional --------------------------------------------------
 
@@ -62,7 +46,7 @@ class Settings(BaseSettings):
 
 
 # Strict-startup validation: pydantic raises ValidationError here if any of
-# the required fields above are missing from the environment. We do NOT
+# the inherited AUX_* fields are missing from the environment. We do NOT
 # catch — the process should fail to boot with a clear traceback identifying
 # the missing variable, rather than 503-ing every authenticated request.
 settings = Settings()
@@ -77,7 +61,7 @@ def require(name: str) -> str:
 
     Use at the call site of any feature backed by a tier-2 (optional) secret,
     e.g. `key = require("anthropic_managed_agents_api_key")`. Tier-1 secrets
-    (auth) are already guaranteed by startup validation and don't need this.
+    (AUX_*) are guaranteed by BaseAuthSettings's strict-startup validation.
     """
     value = getattr(settings, name, None)
     if not value:
