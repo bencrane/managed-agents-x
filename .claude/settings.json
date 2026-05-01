@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.venv/**)",
+      "Read(**/venv/**)",
+      "Read(**/__pycache__/**)",
+      "Read(**/.pytest_cache/**)",
+      "Read(**/.mypy_cache/**)",
+      "Read(**/.ruff_cache/**)",
+      "Read(**/node_modules/**)",
+      "Read(**/dist/**)",
+      "Read(**/build/**)",
+      "Read(**/coverage/**)",
+      "Read(**/htmlcov/**)",
+      "Read(**/uv.lock)",
+      "Read(**/poetry.lock)",
+      "Read(**/Pipfile.lock)",
+      "Read(data/**/*.csv)",
+      "Read(data/**/*.parquet)",
+      "Read(data/**/*.zip)",
+      "Read(data/**/*.gz)",
+      "Read(data/**/raw/**)",
+      "Read(data/**/cache/**)"
+    ]
+  }
+}
